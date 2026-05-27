@@ -9,7 +9,6 @@ import YouTube from 'react-youtube';
 
 const DARK = { bg: '#0a0a0a', bg2: '#111', bg3: '#181818', fg: '#fafaf8', fg2: '#777', fg3: '#3a3a3a', border: '#1c1c1c', border2: '#262626' };
 const LIGHT = { bg: '#fafaf8', bg2: '#f2f2f0', bg3: '#e8e8e6', fg: '#0a0a0a', fg2: '#666', fg3: '#aaa', border: '#e4e4e0', border2: '#d0d0cc' };
-
 const YT_API_KEY = 'AIzaSyDtbHk4XNsk7ayDF4IyqU5T8idw8BfLV3o';
 
 type Screen = 'onboarding' | 'home' | 'room' | 'yt-search' | 'create-room' | 'friends' | 'profile' | 'friend-profile' | 'settings-account' | 'settings-privacy';
@@ -48,6 +47,12 @@ export default function App() {
   const [ytQuery, setYtQuery] = useState('');
   const [ytResults, setYtResults] = useState<any[]>([]);
   const [ytLoading, setYtLoading] = useState(false);
+  const [roomSearchQuery, setRoomSearchQuery] = useState('');
+  const [roomSearchResults, setRoomSearchResults] = useState<any[]>([]);
+  const [roomSearchLoading, setRoomSearchLoading] = useState(false);
+  const [roomLinkUrl, setRoomLinkUrl] = useState('');
+  const [showChangeVideo, setShowChangeVideo] = useState(false);
+  const [changeSourceTab, setChangeSourceTab] = useState<'youtube' | 'twitch' | 'file'>('youtube');
   const [createTitle, setCreateTitle] = useState('');
   const [createPrivacy, setCreatePrivacy] = useState<'public' | 'friends' | 'private'>('public');
   const [sourceTab, setSourceTab] = useState<'youtube' | 'twitch' | 'file'>('youtube');
@@ -63,6 +68,8 @@ export default function App() {
   const [editName, setEditName] = useState('');
   const scrollRef = useRef<HTMLDivElement>(null);
   const ytPlayerRef = useRef<any>(null);
+  const positionInterval = useRef<any>(null);
+  const isHost = useRef(false);
 
   const T = isDark ? DARK : LIGHT;
 
@@ -79,8 +86,7 @@ export default function App() {
       if (u) {
         const snap = await get(ref(db, `users/${u.uid}/name`));
         const name = snap.val() || u.email?.split('@')[0] || 'user';
-        setMyName(name);
-        setEditName(name);
+        setMyName(name); setEditName(name);
         set(ref(db, `users/${u.uid}/online`), true);
         setScreen('home');
       }
@@ -94,14 +100,49 @@ export default function App() {
     onValue(r, snap => {
       const data = snap.val();
       if (!data) return;
-      setIsPlaying(data.playing);
-      if (ytPlayerRef.current) {
-        if (data.playing) ytPlayerRef.current.playVideo();
-        else ytPlayerRef.current.pauseVideo();
+      if (!isHost.current) {
+        setIsPlaying(data.playing);
+        if (ytPlayerRef.current) {
+          if (data.playing) ytPlayerRef.current.playVideo();
+          else ytPlayerRef.current.pauseVideo();
+          if (data.position !== undefined) {
+            try {
+              const current = ytPlayerRef.current.getCurrentTime();
+              if (Math.abs(current - data.position) > 3) {
+                ytPlayerRef.current.seekTo(data.position, true);
+              }
+            } catch {}
+          }
+        }
       }
     });
     return () => off(r);
   }, [currentRoom]);
+
+  // Broadcast position every 5s if host
+  useEffect(() => {
+    if (!currentRoom || !isHost.current || !isPlaying) return;
+    positionInterval.current = setInterval(() => {
+      if (ytPlayerRef.current) {
+        try {
+          const pos = ytPlayerRef.current.getCurrentTime();
+          set(ref(db, `rooms/${currentRoom.id}/sync`), { playing: true, position: pos, ts: Date.now() });
+        } catch {}
+      }
+    }, 5000);
+    return () => clearInterval(positionInterval.current);
+  }, [currentRoom, isPlaying]);
+
+  // Listen for video changes in room
+  useEffect(() => {
+    if (!currentRoom) return;
+    const r = ref(db, `rooms/${currentRoom.id}`);
+    onValue(r, snap => {
+      const data = snap.val();
+      if (data) setCurrentRoom(prev => prev ? { ...prev, ...data, id: prev.id } : prev);
+    });
+    return () => off(r);
+  }, [currentRoom?.id]);
 
   useEffect(() => {
     const r = ref(db, 'rooms');
@@ -127,7 +168,7 @@ export default function App() {
       setTimeout(() => { if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight; }, 100);
     });
     return () => off(r);
-  }, [currentRoom]);
+  }, [currentRoom?.id]);
 
   useEffect(() => {
     if (!currentRoom || !user) return;
@@ -138,14 +179,12 @@ export default function App() {
       setParticipants(snap.val() ? Object.entries(snap.val()).map(([uid, v]: any) => ({ uid, ...v })) : []);
     });
     return () => { remove(pRef); off(allRef); };
-  }, [currentRoom, user, myName]);
+  }, [currentRoom?.id, user, myName]);
 
   useEffect(() => {
     if (!user) return;
     const r = ref(db, `users/${user.uid}/friends`);
-    onValue(r, snap => {
-      setFriends(snap.val() ? Object.entries(snap.val()).map(([uid, v]: any) => ({ uid, ...v })) : []);
-    });
+    onValue(r, snap => { setFriends(snap.val() ? Object.entries(snap.val()).map(([uid, v]: any) => ({ uid, ...v })) : []); });
     return () => off(r);
   }, [user]);
 
@@ -171,15 +210,14 @@ export default function App() {
         const cred = await createUserWithEmailAndPassword(auth, email, password);
         const name = username.trim();
         await set(ref(db, `users/${cred.user.uid}`), { name, email, online: true });
-        setMyName(name);
-        setEditName(name);
+        setMyName(name); setEditName(name);
       }
     } catch (e: any) {
       setAuthError(
         e.code === 'auth/invalid-credential' ? 'Неверный email или пароль' :
         e.code === 'auth/email-already-in-use' ? 'Email уже используется' :
         e.code === 'auth/weak-password' ? 'Минимум 6 символов' :
-        e.code === 'auth/invalid-email' ? 'Неверный email' : 'Ошибка. Попробуй снова'
+        e.code === 'auth/invalid-email' ? 'Неверный email' : 'Ошибка'
       );
     }
     setAuthLoading(false);
@@ -187,8 +225,7 @@ export default function App() {
 
   const handleLogout = async () => {
     if (user) set(ref(db, `users/${user.uid}/online`), false);
-    await signOut(auth);
-    setScreen('onboarding'); setUser(null); setMyName('');
+    await signOut(auth); setScreen('onboarding'); setUser(null); setMyName('');
   };
 
   const sendMessage = async () => {
@@ -197,32 +234,55 @@ export default function App() {
     setMessage('');
   };
 
-  const createRoom = async (videoId?: string, ytTitle?: string, source: 'youtube' | 'twitch' | 'file' = 'youtube') => {
+  const openRoom = (room: Room) => {
+    isHost.current = room.host === myName;
+    setCurrentRoom(room); setMessages([]); setIsPlaying(false); setScreen('room');
+  };
+
+  const createRoom = async (videoId?: string, ytTitle?: string, source: 'youtube' | 'twitch' | 'file' = 'youtube', url?: string) => {
     if (!user) return;
     const title = ytTitle || createTitle || 'Новая комната';
     const roomData: any = { title, source, host: myName, privacy: createPrivacy, createdAt: Date.now() };
     if (videoId) roomData.videoId = videoId;
-    if (fileUrl && !videoId) roomData.url = fileUrl.startsWith('http') ? fileUrl : `https://${fileUrl}`;
+    if (url) roomData.url = url.startsWith('http') ? url : `https://${url}`;
+    else if (fileUrl && !videoId) roomData.url = fileUrl.startsWith('http') ? fileUrl : `https://${fileUrl}`;
     const newRef = await push(ref(db, 'rooms'), roomData);
+    isHost.current = true;
     setCurrentRoom({ id: newRef.key!, ...roomData });
     setMessages([]); setIsPlaying(false); setScreen('room');
     setCreateTitle(''); setFileUrl('');
   };
 
-  const syncPlay = async (playing: boolean) => {
-    if (!currentRoom) return;
-    await set(ref(db, `rooms/${currentRoom.id}/sync`), { playing, ts: Date.now() });
+  const changeVideo = async (videoId?: string, ytTitle?: string, source: 'youtube' | 'twitch' | 'file' = 'youtube', url?: string) => {
+    if (!currentRoom || !user) return;
+    const updates: any = { source, title: ytTitle || currentRoom.title };
+    if (videoId) { updates.videoId = videoId; updates.url = null; }
+    if (url) { updates.url = url.startsWith('http') ? url : `https://${url}`; updates.videoId = null; }
+    await set(ref(db, `rooms/${currentRoom.id}`), { ...currentRoom, ...updates });
+    await set(ref(db, `rooms/${currentRoom.id}/sync`), { playing: false, position: 0, ts: Date.now() });
+    setIsPlaying(false); setShowChangeVideo(false);
+    setRoomLinkUrl(''); setRoomSearchResults([]); setRoomSearchQuery('');
   };
 
-  const searchYT = async () => {
-    if (!ytQuery.trim()) return;
-    setYtLoading(true);
+  const syncPlay = async (playing: boolean) => {
+    if (!currentRoom) return;
+    isHost.current = true;
+    setIsPlaying(playing);
+    let pos = 0;
+    try { pos = ytPlayerRef.current?.getCurrentTime() || 0; } catch {}
+    await set(ref(db, `rooms/${currentRoom.id}/sync`), { playing, position: pos, ts: Date.now() });
+  };
+
+  const searchYT = async (query: string, forRoom = false) => {
+    if (!query.trim()) return;
+    if (forRoom) setRoomSearchLoading(true); else setYtLoading(true);
     try {
-      const res = await fetch(`https://www.googleapis.com/youtube/v3/search?part=snippet&q=${encodeURIComponent(ytQuery)}&type=video&maxResults=20&key=${YT_API_KEY}`);
+      const res = await fetch(`https://www.googleapis.com/youtube/v3/search?part=snippet&q=${encodeURIComponent(query)}&type=video&maxResults=20&key=${YT_API_KEY}`);
       const data = await res.json();
-      setYtResults(data.items?.map((i: any) => ({ id: i.id.videoId, title: i.snippet.title, thumb: i.snippet.thumbnails.medium.url, channel: i.snippet.channelTitle })) || []);
+      const results = data.items?.map((i: any) => ({ id: i.id.videoId, title: i.snippet.title, thumb: i.snippet.thumbnails.medium.url, channel: i.snippet.channelTitle })) || [];
+      if (forRoom) setRoomSearchResults(results); else setYtResults(results);
     } catch { alert('Ошибка поиска'); }
-    setYtLoading(false);
+    if (forRoom) setRoomSearchLoading(false); else setYtLoading(false);
   };
 
   const searchUsers = async () => {
@@ -230,11 +290,7 @@ export default function App() {
     const snap = await get(ref(db, 'users'));
     const data = snap.val();
     if (!data) { setSearchResults([]); return; }
-    setSearchResults(
-      Object.entries(data)
-        .filter(([uid, v]: any) => uid !== user?.uid && v.name?.toLowerCase().includes(searchQuery.toLowerCase()))
-        .map(([uid, v]: any) => ({ uid, name: v.name }))
-    );
+    setSearchResults(Object.entries(data).filter(([uid, v]: any) => uid !== user?.uid && v.name?.toLowerCase().includes(searchQuery.toLowerCase())).map(([uid, v]: any) => ({ uid, name: (v as any).name })));
   };
 
   const sendFriendRequest = async (toUid: string, toName: string) => {
@@ -251,12 +307,12 @@ export default function App() {
   };
 
   const leaveRoom = () => {
+    clearInterval(positionInterval.current);
     setCurrentRoom(null); setMessages([]); setParticipants([]); setIsPlaying(false);
     setScreen('home'); setActiveTab('home');
   };
 
   const c = (obj: Record<string, any>) => obj as React.CSSProperties;
-
   const st = {
     safe: c({ minHeight: '100vh', backgroundColor: T.bg, color: T.fg }),
     topbar: c({ display: 'flex', alignItems: 'center', gap: 12, padding: '14px 20px', borderBottom: `0.5px solid ${T.border}`, backgroundColor: T.bg, position: 'sticky', top: 0, zIndex: 50 }),
@@ -272,7 +328,7 @@ export default function App() {
     seclbl: c({ fontSize: 10, letterSpacing: 2, color: T.fg3, fontFamily: 'monospace' }),
     menuitem: c({ display: 'flex', alignItems: 'center', gap: 14, padding: '15px 0', borderBottom: `0.5px solid ${T.border}`, cursor: 'pointer' }),
     modal: c({ position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.85)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center', zIndex: 100 }),
-    sheet: c({ backgroundColor: T.bg2, borderRadius: '16px 16px 0 0', padding: 24, paddingBottom: 40, width: '100%', maxWidth: 600 }),
+    sheet: c({ backgroundColor: T.bg2, borderRadius: '16px 16px 0 0', padding: 24, paddingBottom: 40, width: '100%', maxWidth: 600, maxHeight: '80vh', overflowY: 'auto' }),
   };
 
   if (screen === 'onboarding') return (
@@ -308,6 +364,7 @@ export default function App() {
         <button onClick={leaveRoom} style={{ background: 'none', border: 'none', color: T.fg2, cursor: 'pointer', fontSize: 18 }}>✕</button>
         <Wordmark color={T.fg} size={13} />
         <div style={{ display: 'flex', gap: 14, alignItems: 'center' }}>
+          <button onClick={() => setShowChangeVideo(true)} style={{ background: 'none', border: 'none', color: T.fg2, cursor: 'pointer', fontSize: 16 }} title="Сменить видео">⇄</button>
           <button onClick={() => setShowParticipants(true)} style={{ background: 'none', border: 'none', color: T.fg2, cursor: 'pointer', fontSize: 13, fontFamily: 'monospace' }}>⁋ {participants.length}</button>
           <button onClick={() => setShowInvite(true)} style={{ background: 'none', border: 'none', color: T.fg2, cursor: 'pointer', fontSize: 18 }}>⊕</button>
         </div>
@@ -325,8 +382,10 @@ export default function App() {
                 onPause={() => syncPlay(false)}
                 style={{ width: '100%', height: '100%' }}
               />
-            ) : (
+            ) : currentRoom.url ? (
               <iframe src={currentRoom.url} style={{ width: '100%', height: '100%', border: 'none' }} allowFullScreen title="video" />
+            ) : (
+              <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: T.fg3, fontFamily: 'monospace', fontSize: 12, letterSpacing: 2 }}>НЕТ ВИДЕО · НАЖМИ ⇄ ЧТОБЫ ДОБАВИТЬ</div>
             )}
           </div>
           <div style={{ padding: '10px 14px', borderBottom: `0.5px solid ${T.border}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -357,6 +416,54 @@ export default function App() {
           </div>
         </div>
       </div>
+
+      {/* Change Video Modal */}
+      {showChangeVideo && (
+        <div style={st.modal} onClick={() => setShowChangeVideo(false)}>
+          <div style={st.sheet} onClick={e => e.stopPropagation()}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16 }}>
+              <span style={{ color: T.fg, fontFamily: 'monospace', letterSpacing: 2 }}>СМЕНИТЬ ВИДЕО</span>
+              <button onClick={() => setShowChangeVideo(false)} style={{ background: 'none', border: 'none', color: T.fg2, cursor: 'pointer', fontSize: 18 }}>✕</button>
+            </div>
+            <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
+              {(['youtube', 'twitch', 'file'] as const).map(t => (
+                <button key={t} onClick={() => setChangeSourceTab(t)} style={{ flex: 1, padding: 8, border: `0.5px solid ${changeSourceTab === t ? T.fg : T.border}`, borderRadius: 8, backgroundColor: changeSourceTab === t ? T.bg3 : 'transparent', color: changeSourceTab === t ? T.fg : T.fg3, cursor: 'pointer', fontFamily: 'monospace', fontSize: 9, letterSpacing: 1 }}>{t.toUpperCase()}</button>
+              ))}
+            </div>
+            {changeSourceTab === 'youtube' && (
+              <>
+                <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+                  <div style={st.srchbar}>
+                    <span style={{ color: T.fg3 }}>⊙</span>
+                    <input style={{ flex: 1, background: 'none', border: 'none', color: T.fg, fontSize: 14, padding: '9px 0', outline: 'none' }} placeholder="Поиск YouTube..." value={roomSearchQuery} onChange={e => setRoomSearchQuery(e.target.value)} onKeyDown={e => e.key === 'Enter' && searchYT(roomSearchQuery, true)} />
+                  </div>
+                  <button onClick={() => searchYT(roomSearchQuery, true)} style={{ backgroundColor: T.fg, color: T.bg, border: 'none', borderRadius: 8, padding: '0 14px', cursor: 'pointer' }}>
+                    {roomSearchLoading ? '...' : '⊙'}
+                  </button>
+                </div>
+                <div style={{ maxHeight: 300, overflowY: 'auto' }}>
+                  {roomSearchResults.map(item => (
+                    <div key={item.id} style={{ display: 'flex', gap: 10, marginBottom: 12, cursor: 'pointer' }} onClick={() => changeVideo(item.id, item.title, 'youtube')}>
+                      <img src={item.thumb} alt="" style={{ width: 120, height: 68, borderRadius: 6, objectFit: 'cover', backgroundColor: T.bg3, flexShrink: 0 }} />
+                      <div>
+                        <div style={{ color: T.fg, fontSize: 13, lineHeight: 1.4, marginBottom: 3 }}>{item.title}</div>
+                        <div style={{ color: T.fg3, fontSize: 10, fontFamily: 'monospace', letterSpacing: 1 }}>{item.channel.toUpperCase()}</div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+            {(changeSourceTab === 'twitch' || changeSourceTab === 'file') && (
+              <>
+                <div style={{ ...st.seclbl, marginBottom: 8 }}>{changeSourceTab === 'twitch' ? 'ССЫЛКА НА КАНАЛ' : 'ПРЯМАЯ ССЫЛКА'}</div>
+                <input style={{ ...st.inp, marginBottom: 12 }} placeholder={changeSourceTab === 'twitch' ? 'twitch.tv/channel' : 'https://example.com/video.mp4'} value={roomLinkUrl} onChange={e => setRoomLinkUrl(e.target.value)} />
+                <button style={st.btnp} onClick={() => changeVideo(undefined, undefined, changeSourceTab, roomLinkUrl)}>ПРИМЕНИТЬ</button>
+              </>
+            )}
+          </div>
+        </div>
+      )}
 
       {showParticipants && (
         <div style={st.modal} onClick={() => setShowParticipants(false)}>
@@ -400,10 +507,10 @@ export default function App() {
         <button onClick={() => { setScreen('home'); setYtResults([]); setYtQuery(''); }} style={{ background: 'none', border: 'none', color: T.fg2, cursor: 'pointer', fontSize: 18 }}>←</button>
         <div style={st.srchbar}>
           <span style={{ color: T.fg3 }}>⊙</span>
-          <input style={{ flex: 1, background: 'none', border: 'none', color: T.fg, fontSize: 14, padding: '9px 0', outline: 'none' }} placeholder="Поиск на YouTube..." value={ytQuery} onChange={e => setYtQuery(e.target.value)} onKeyDown={e => e.key === 'Enter' && searchYT()} autoFocus />
+          <input style={{ flex: 1, background: 'none', border: 'none', color: T.fg, fontSize: 14, padding: '9px 0', outline: 'none' }} placeholder="Поиск на YouTube..." value={ytQuery} onChange={e => setYtQuery(e.target.value)} onKeyDown={e => e.key === 'Enter' && searchYT(ytQuery)} autoFocus />
           {ytQuery && <button onClick={() => { setYtQuery(''); setYtResults([]); }} style={{ background: 'none', border: 'none', color: T.fg3, cursor: 'pointer', fontSize: 16 }}>✕</button>}
         </div>
-        <button onClick={searchYT} style={{ backgroundColor: T.fg, color: T.bg, border: 'none', borderRadius: 8, padding: '9px 14px', fontFamily: 'monospace', letterSpacing: 1, cursor: 'pointer', fontSize: 12 }}>НАЙТИ</button>
+        <button onClick={() => searchYT(ytQuery)} style={{ backgroundColor: T.fg, color: T.bg, border: 'none', borderRadius: 8, padding: '9px 14px', fontFamily: 'monospace', letterSpacing: 1, cursor: 'pointer', fontSize: 12 }}>НАЙТИ</button>
       </div>
       <div style={{ padding: 16, maxWidth: 900, margin: '0 auto' }}>
         {ytLoading ? <div style={{ textAlign: 'center', padding: 60, color: T.fg3 }}>...</div> :
@@ -469,10 +576,8 @@ export default function App() {
           <div style={{ width: 80, height: 80, borderRadius: 40, backgroundColor: T.bg2, border: `1.5px solid ${T.fg}`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 28, color: T.fg2, fontFamily: 'monospace', margin: '0 auto 16px' }}>{selectedFriend.name?.[0]?.toUpperCase()}</div>
           <div style={{ color: T.fg, fontSize: 20, marginBottom: 4 }}>{selectedFriend.name}</div>
           <div style={{ color: T.fg3, fontSize: 11, fontFamily: 'monospace', letterSpacing: 2, marginBottom: 32 }}>EST · MMXXVI</div>
-          {!isFriend
-            ? <button style={st.btnp} onClick={() => sendFriendRequest(selectedFriend.uid, selectedFriend.name)}>ДОБАВИТЬ В ДРУЗЬЯ</button>
-            : <div style={{ color: T.fg3, fontFamily: 'monospace', letterSpacing: 2 }}>УЖЕ В ДРУЗЬЯХ</div>
-          }
+          {!isFriend ? <button style={st.btnp} onClick={() => sendFriendRequest(selectedFriend.uid, selectedFriend.name)}>ДОБАВИТЬ В ДРУЗЬЯ</button>
+            : <div style={{ color: T.fg3, fontFamily: 'monospace', letterSpacing: 2 }}>УЖЕ В ДРУЗЬЯХ</div>}
         </div>
       </div>
     );
@@ -490,15 +595,14 @@ export default function App() {
         <button style={{ ...st.btnp, marginBottom: 24 }} onClick={async () => {
           if (!editName.trim() || !user) return;
           await set(ref(db, `users/${user.uid}/name`), editName.trim());
-          setMyName(editName.trim());
-          alert('Ник изменён!');
+          setMyName(editName.trim()); alert('Ник изменён!');
         }}>СОХРАНИТЬ НИК</button>
         <div style={{ ...st.seclbl, marginBottom: 10 }}>СМЕНИТЬ ПАРОЛЬ</div>
         <input style={{ ...st.inp, marginBottom: 10 }} type="password" placeholder="Новый пароль (мин. 6 символов)" value={newPassword} onChange={e => setNewPassword(e.target.value)} />
         <button style={st.btnp} onClick={async () => {
           if (!newPassword || newPassword.length < 6) { alert('Минимум 6 символов'); return; }
           try { await updatePassword(user!, newPassword); alert('Пароль изменён!'); setNewPassword(''); }
-          catch { alert('Войди заново и попробуй снова'); }
+          catch { alert('Войди заново'); }
         }}>СОХРАНИТЬ ПАРОЛЬ</button>
       </div>
     </div>
@@ -547,7 +651,7 @@ export default function App() {
             {rooms.length === 0 && <div style={{ textAlign: 'center', paddingTop: 60, color: T.fg3, fontFamily: 'monospace', letterSpacing: 2 }}>НЕТ АКТИВНЫХ КОМНАТ</div>}
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: 10 }}>
               {rooms.map(room => (
-                <div key={room.id} style={st.card} onClick={() => { setCurrentRoom(room); setMessages([]); setIsPlaying(false); setScreen('room'); }}>
+                <div key={room.id} style={st.card} onClick={() => openRoom(room)}>
                   <div style={{ height: 110, backgroundColor: T.bg3, display: 'flex', alignItems: 'center', justifyContent: 'center', position: 'relative' }}>
                     <span style={{ fontSize: 28, color: T.fg3 }}>{room.source === 'youtube' ? '▶' : room.source === 'twitch' ? '◈' : '▤'}</span>
                     <div style={{ position: 'absolute', top: 8, left: 8, backgroundColor: 'rgba(0,0,0,0.7)', borderRadius: 4, padding: '2px 6px', fontSize: 9, fontFamily: 'monospace', color: '#aaa' }}>{room.source.toUpperCase()}</div>
@@ -594,7 +698,8 @@ export default function App() {
                 <div key={u.uid} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 0', borderBottom: `0.5px solid ${T.border}`, cursor: 'pointer' }} onClick={() => { setSelectedFriend(u); setScreen('friend-profile'); }}>
                   <div style={{ width: 40, height: 40, borderRadius: 20, backgroundColor: T.bg2, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 14, color: T.fg2, fontFamily: 'monospace' }}>{u.name?.[0]?.toUpperCase()}</div>
                   <span style={{ color: T.fg, fontSize: 13, fontWeight: 500, flex: 1 }}>{u.name}</span>
-                  {isFriend ? <span style={{ color: T.fg3, fontSize: 9, fontFamily: 'monospace', letterSpacing: 1 }}>ДРУГ</span> : <button onClick={e => { e.stopPropagation(); sendFriendRequest(u.uid, u.name); }} style={{ background: 'none', border: `0.5px solid ${T.border2}`, borderRadius: 6, padding: '6px 10px', color: T.fg3, cursor: 'pointer' }}>+</button>}
+                  {isFriend ? <span style={{ color: T.fg3, fontSize: 9, fontFamily: 'monospace', letterSpacing: 1 }}>ДРУГ</span>
+                    : <button onClick={e => { e.stopPropagation(); sendFriendRequest(u.uid, u.name); }} style={{ background: 'none', border: `0.5px solid ${T.border2}`, borderRadius: 6, padding: '6px 10px', color: T.fg3, cursor: 'pointer' }}>+</button>}
                 </div>
               );
             })}
