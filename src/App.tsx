@@ -100,7 +100,7 @@ export default function App() {
     onValue(r, snap => {
       const data = snap.val();
       if (!data) return;
-      if (!isHost.current) {
+      // sync all participants
         setIsPlaying(data.playing);
         if (ytPlayerRef.current) {
           if (data.playing) ytPlayerRef.current.playVideo();
@@ -114,7 +114,6 @@ export default function App() {
             } catch {}
           }
         }
-      }
     });
     return () => off(r);
   }, [currentRoom]);
