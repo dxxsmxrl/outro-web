@@ -70,6 +70,7 @@ export default function App() {
   const ytPlayerRef = useRef<any>(null);
   const positionInterval = useRef<any>(null);
   const isHost = useRef(false);
+  const isSyncing = useRef(false);
 
   const T = isDark ? DARK : LIGHT;
 
@@ -100,7 +101,7 @@ export default function App() {
     onValue(r, snap => {
       const data = snap.val();
       if (!data) return;
-      if (data.uid === user.uid) return;
+      if (isSyncing.current) return;
       setIsPlaying(data.playing);
       if (ytPlayerRef.current) {
         if (data.playing) ytPlayerRef.current.playVideo();
@@ -266,10 +267,12 @@ export default function App() {
   const syncPlay = async (playing: boolean) => {
     if (!currentRoom) return;
     isHost.current = true;
+    isSyncing.current = true;
+    setTimeout(() => { isSyncing.current = false; }, 2000);
     setIsPlaying(playing);
     let pos = 0;
     try { pos = ytPlayerRef.current?.getCurrentTime() || 0; } catch {}
-    await set(ref(db, `rooms/${currentRoom.id}/sync`), { playing, position: pos, ts: Date.now(), uid: user?.uid });
+    await set(ref(db, `rooms/${currentRoom.id}/sync`), { playing, position: pos, ts: Date.now()});
   };
 
   const searchYT = async (query: string, forRoom = false) => {
