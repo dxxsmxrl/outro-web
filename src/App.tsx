@@ -95,28 +95,28 @@ export default function App() {
 
   // Sync listener
   useEffect(() => {
-    if (!currentRoom) return;
+    if (!currentRoom || !user) return;
     const r = ref(db, `rooms/${currentRoom.id}/sync`);
     onValue(r, snap => {
       const data = snap.val();
       if (!data) return;
-      // sync all participants
-        setIsPlaying(data.playing);
-        if (ytPlayerRef.current) {
-          if (data.playing) ytPlayerRef.current.playVideo();
-          else ytPlayerRef.current.pauseVideo();
-          if (data.position !== undefined) {
-            try {
-              const current = ytPlayerRef.current.getCurrentTime();
-              if (Math.abs(current - data.position) > 3) {
-                ytPlayerRef.current.seekTo(data.position, true);
-              }
-            } catch {}
-          }
+      if (data.uid === user.uid) return;
+      setIsPlaying(data.playing);
+      if (ytPlayerRef.current) {
+        if (data.playing) ytPlayerRef.current.playVideo();
+        else ytPlayerRef.current.pauseVideo();
+        if (data.position !== undefined) {
+          try {
+            const current = ytPlayerRef.current.getCurrentTime();
+            if (Math.abs(current - data.position) > 8) {
+              ytPlayerRef.current.seekTo(data.position, true);
+            }
+          } catch {}
         }
+      }
     });
     return () => off(r);
-  }, [currentRoom]);
+  }, [currentRoom, user]);
 
   // Broadcast position every 5s if host
   useEffect(() => {
@@ -269,7 +269,7 @@ export default function App() {
     setIsPlaying(playing);
     let pos = 0;
     try { pos = ytPlayerRef.current?.getCurrentTime() || 0; } catch {}
-    await set(ref(db, `rooms/${currentRoom.id}/sync`), { playing, position: pos, ts: Date.now() });
+    await set(ref(db, `rooms/${currentRoom.id}/sync`), { playing, position: pos, ts: Date.now(), uid: user?.uid });
   };
 
   const searchYT = async (query: string, forRoom = false) => {
